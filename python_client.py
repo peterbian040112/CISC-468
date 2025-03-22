@@ -1,4 +1,4 @@
-# main_ui.py
+# python_client.py
 # P2P Secure File Sharing UI with real mDNS discovery (Zeroconf)
 
 import tkinter as tk

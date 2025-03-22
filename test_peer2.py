@@ -1,4 +1,4 @@
-# client2_headless.py
+# test_peer2.py
 # A headless client that registers itself via mDNS but does NOT discover others
 
 from zeroconf import Zeroconf, ServiceInfo
