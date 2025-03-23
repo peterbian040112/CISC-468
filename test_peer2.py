@@ -1,18 +1,17 @@
 # test_peer2.py
-# A headless client that registers itself via mDNS but does NOT discover others
 
 from zeroconf import Zeroconf, ServiceInfo
 import socket
 import time
+import threading
+import json
+from rsa_utils import load_keys, serialize_public_key
 
 SERVICE_TYPE = "_p2pfileshare._tcp.local."
 SERVICE_NAME = "PythonPeer2._p2pfileshare._tcp.local."
 PORT = 9001
 
 def get_local_ip():
-    """
-    Returns the local (non-loopback) IP address.
-    """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('10.255.255.255', 1))
@@ -24,9 +23,6 @@ def get_local_ip():
     return IP
 
 def register_service():
-    """
-    Registers this peer as an mDNS service.
-    """
     zeroconf = Zeroconf()
     ip = socket.inet_aton(get_local_ip())
     info = ServiceInfo(
@@ -41,9 +37,35 @@ def register_service():
     print(f"[✓] Service '{SERVICE_NAME}' registered on {get_local_ip()}:{PORT}")
     return zeroconf
 
+def start_key_exchange_server(private_key, public_key):
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("0.0.0.0", PORT))
+    server.listen(5)
+    print(f"[*] RSA Key Exchange Server running on port {PORT}")
+
+    while True:
+        conn, addr = server.accept()
+        with conn:
+            print(f"[+] Connection from {addr}")
+            try:
+                data = conn.recv(4096).decode()
+                request = json.loads(data)
+                if request["type"] == "key_exchange":
+                    print("[*] Received public key from client.")
+                    response = {
+                        "type": "key_exchange_response",
+                        "public_key": serialize_public_key(public_key)
+                    }
+                    conn.sendall(json.dumps(response).encode())
+                    print("[✓] Sent back our public key.")
+            except Exception as e:
+                print(f"[!] Error: {e}")
+
 if __name__ == "__main__":
-    # Register only (no discovery)
+    private_key, public_key = load_keys()
     zc = register_service()
+    threading.Thread(target=start_key_exchange_server, args=(private_key, public_key), daemon=True).start()
+
     print("[*] Service running. Press Ctrl+C to exit.")
     try:
         while True:
@@ -51,4 +73,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n[!] Shutting down.")
         zc.close()
+
 

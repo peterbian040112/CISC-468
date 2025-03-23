@@ -4,19 +4,27 @@
 import tkinter as tk
 from tkinter import messagebox
 import threading
-import mdns_discovery  # import your discovery module
+
+import mdns_discovery  # Custom module for mDNS discovery
+
+import socket, json
+from rsa_utils import load_keys, serialize_public_key
+
 
 class P2PGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("P2P Secure File Sharing")
 
+        self.private_key, self.public_key = load_keys()
+        
         # Peer list UI
         peer_frame = tk.LabelFrame(root, text="Peers", padx=10, pady=5)
         peer_frame.grid(row=0, column=0, padx=10, pady=10)
         self.peer_listbox = tk.Listbox(peer_frame, width=50, height=8, selectmode=tk.SINGLE)
         self.peer_listbox.pack()
         tk.Button(peer_frame, text="Refresh Peers", command=self.refresh_peers).pack(pady=5)
+        tk.Button(peer_frame, text="Connect to Selected Peer", command=self.connect_to_peer).pack(pady=5)
 
         # File list UI
         file_frame = tk.LabelFrame(root, text="Shared Files", padx=10, pady=5)
@@ -36,6 +44,45 @@ class P2PGUI:
 
         # Start background peer discovery (initial)
         threading.Thread(target=self.start_discovery, daemon=True).start()
+
+    def connect_to_peer(self):
+        selected = self.peer_listbox.curselection()
+        if not selected:
+            messagebox.showwarning("No peer selected", "Please select a peer to connect.")
+            return
+
+        peer_str = self.peer_listbox.get(selected[0])
+        try:
+            addr_part = peer_str.split(" - ")[-1]
+            ip, port = addr_part.split(":")
+            port = int(port)
+        except Exception:
+            self.log("Failed to parse peer address.")
+            return
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((ip, port))
+                self.log(f"Connected to {ip}:{port}")
+
+                # Send public key
+                msg = {
+                    "type": "key_exchange",
+                    "public_key": serialize_public_key(self.public_key)
+                }
+                s.sendall(json.dumps(msg).encode())
+
+                # Receive peer's public key
+                data = s.recv(4096).decode()
+                response = json.loads(data)
+                peer_pub_key = response.get("public_key")
+                if peer_pub_key:
+                    self.log("Received peer public key.")
+                    messagebox.showinfo("Key Exchange", "RSA public key exchange successful.")
+                else:
+                    self.log("No public key received.")
+        except Exception as e:
+            self.log(f"Connection failed: {e}")
 
     def refresh_peers(self):
         """
