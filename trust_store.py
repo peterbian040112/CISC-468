@@ -37,9 +37,9 @@ def verify_peer_identity(peer_id, peer_public_key, gui_prompt_fn=None):
 
     if peer_id in trust_store:
         if trust_store[peer_id] == fingerprint:
-            return True  # ✅ Match
+            return True  # Match
         else:
-            return False  # ❌ Mismatch — possibly an attacker
+            return False  # Mismatch — possibly an attacker
     else:
         # 🟡 Unknown peer — prompt the user
         if gui_prompt_fn is not None:

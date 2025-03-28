@@ -18,6 +18,12 @@ from trust_store import verify_peer_identity
 
 import base64
 
+from aes_utils import generate_aes_key, aes_encrypt
+from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives import serialization
+
+
 
 
 
@@ -36,6 +42,7 @@ class P2PGUI:
         self.peer_listbox = tk.Listbox(peer_frame, width=50, height=8, selectmode=tk.SINGLE)
         self.peer_listbox.pack()
         tk.Button(peer_frame, text="Refresh Peers", command=self.refresh_peers).pack(pady=5)
+        tk.Button(root, text="Regenerate RSA Key", command=self.regenerate_keys).grid(row=2, column=0, columnspan=2, pady=10)
         tk.Button(peer_frame, text="Connect to Selected Peer", command=self.connect_to_peer).pack(pady=5)
 
         # File list UI
@@ -91,6 +98,8 @@ class P2PGUI:
                 response = json.loads(data)
                 peer_pub_key = response.get("public_key")
                 peer_id = peer_str.split(" - ")[0].strip()
+                self.peer_public_key = serialization.load_pem_public_key(peer_pub_key.encode())
+
 
                 def prompt_trust(peer_id, fingerprint):
                     return messagebox.askyesno("Untrusted Peer", f"New peer '{peer_id}'\nFingerprint:\n{fingerprint[:32]}...\nTrust this peer?")
@@ -212,18 +221,60 @@ class P2PGUI:
         try:
             with open(filepath, "rb") as f:
                 data = f.read()
-                b64_data = base64.b64encode(data).decode()
-                sha256 = hashlib.sha256(data).hexdigest()
+
+            aes_key = generate_aes_key()
+            ciphertext_b64 = aes_encrypt(aes_key, data)
+            sha256 = hashlib.sha256(data).hexdigest()
+            
+            encrypted_key = self.peer_public_key.encrypt(
+                aes_key,
+                rsa_padding.OAEP(
+                    mgf=rsa_padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
+                )
+            )
+            encrypted_key_b64 = base64.b64encode(encrypted_key).decode()
 
             ip, port = self.connected_peer
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((ip, port))
-                request = {
+
+                # Normal case
+                # request = {
+                #     "type": "send_file_request",
+                #     "filename": filename,
+                #     "aes_key": encrypted_key_b64,
+                #     "content": ciphertext_b64,
+                #     "hash": sha256
+                # }
+
+                # attack cases:
+                # 1. Tampered file content (integrity fail)
+                request ={
                     "type": "send_file_request",
                     "filename": filename,
-                    "content": b64_data,
+                    "aes_key": encrypted_key_b64,
+                    "content": "0000000000000000000000000000000000000000000000000000000000000000",
                     "hash": sha256
                 }
+                # 2. Forged hash (integrity mismatch)
+                # request ={
+                #     "type": "send_file_request",
+                #     "filename": filename,
+                #     "aes_key": encrypted_key_b64,
+                #     "content": ciphertext_b64,
+                #     "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+                # }
+                # 3. Wrong RSA public key used to encrypt AES key
+                # request ={
+                #     "type": "send_file_request",
+                #     "filename": filename,
+                #     "aes_key": "0000000000000000000000000000000000000000000000000000000000000000",
+                #     "content": ciphertext_b64,
+                #     "hash": sha256
+                # }
+
                 s.sendall(json.dumps(request).encode())
 
                 response = json.loads(s.recv(2048).decode())
@@ -234,6 +285,21 @@ class P2PGUI:
 
         except Exception as e:
             self.log(f"[!] Failed to send file: {e}")
+
+    def regenerate_keys(self):
+        if messagebox.askyesno("Confirm", "Are you sure you want to regenerate your RSA key? This will invalidate your current identity."):
+            from rsa_utils import generate_keys
+            self.private_key, self.public_key = generate_keys()
+            messagebox.showinfo("Success", "New RSA key pair generated.")
+            self.log("[✓] Generated new RSA key pair.")
+
+        if os.path.exists("trusted_peers.json"):
+            os.remove("trusted_peers.json")
+            self.log("[!] Old trusted peers removed due to key change.")
+            messagebox.showinfo("Trust Reset", "Trusted peers have been cleared. You must re-authenticate with them.")
+
+
+
 
 
     def log(self, msg):
