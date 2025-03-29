@@ -4,8 +4,8 @@ from cryptography.hazmat.backends import default_backend
 import os
 import base64
 
-def generate_aes_key():
-    return os.urandom(32)  # 256-bit AES key
+# def generate_aes_key():
+#     return os.urandom(32)  # 256-bit AES key
 
 def aes_encrypt(key, plaintext):
     iv = os.urandom(16)

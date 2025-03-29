@@ -4,6 +4,8 @@
 import tkinter as tk
 from tkinter import messagebox
 from tkinter import filedialog
+from tkinter import simpledialog
+from secure_storage import derive_key_from_password
 import threading
 import os
 
@@ -18,11 +20,15 @@ from trust_store import verify_peer_identity
 
 import base64
 
-from aes_utils import generate_aes_key, aes_encrypt
+from aes_utils import aes_encrypt
 from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 
+from sts_utils import generate_ecdh_keypair, derive_shared_key, sign_data, verify_signature
+
+from getpass import getpass
+from secure_storage import derive_key_from_password
 
 
 
@@ -65,6 +71,16 @@ class P2PGUI:
 
         # Start background peer discovery (initial)
         threading.Thread(target=self.start_discovery, daemon=True).start()
+
+        password = simpledialog.askstring("Storage Password", "Enter your storage password:", show="*")
+        if not password:
+            messagebox.showerror("Error", "Storage password is required to continue.")
+            root.destroy()
+            return
+
+        salt = b'p2p-storage-salt'
+        self.user_storage_key = derive_key_from_password(password, salt)
+        self.log("[✓] Storage password accepted and key derived.")
 
     def connect_to_peer(self):
         selected = self.peer_listbox.curselection()
@@ -153,10 +169,12 @@ class P2PGUI:
         if peer_str == self.local_peer_id:
             display_str = "[local] " + peer_str
 
-        # Prevent duplicate entries
-        if display_str not in self.peer_listbox.get(0, tk.END):
-            self.peer_listbox.insert(tk.END, display_str)
-            self.log(f"Discovered peer: {display_str}")
+        def gui_update():
+            if display_str not in self.peer_listbox.get(0, tk.END):
+                self.peer_listbox.insert(tk.END, display_str)
+                self.log(f"Discovered peer: {display_str}")
+        self.root.after(0, gui_update)
+
 
     def request_files(self):
         """
@@ -173,7 +191,7 @@ class P2PGUI:
             messagebox.showwarning("No file selected", "Please select files to request.")
             return
 
-        os.makedirs("downloads", exist_ok=True)
+        os.makedirs("downloads_encrypted", exist_ok=True)
 
         for fname in selected_files:
             try:
@@ -198,7 +216,7 @@ class P2PGUI:
 
                     if response["type"] == "file_transfer":
                         file_data = base64.b64decode(response["content"])
-                        with open(os.path.join("downloads", fname), "wb") as f:
+                        with open(os.path.join("downloads_encrypted", fname), "wb") as f:
                             f.write(file_data)
                         self.log(f"Downloaded: {fname} ({len(file_data)} bytes)")
                     elif response["type"] == "refused":
@@ -208,6 +226,163 @@ class P2PGUI:
             except Exception as e:
                 self.log(f"[!] Error requesting {fname}: {e}")
 
+    # def send_file_to_peer(self):
+    #     if not self.connected_peer:
+    #         messagebox.showwarning("Not Connected", "Please connect to a peer first.")
+    #         return
+
+    #     filepath = filedialog.askopenfilename(title="Select file to send")
+    #     if not filepath:
+    #         return
+
+    #     filename = os.path.basename(filepath)
+
+    #     try:
+    #         ip, port = self.connected_peer
+    #         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #             s.connect((ip, port))
+
+    #             # STS step 1: generate ephemeral ECDH key pair and sign it
+    #             ecdh_priv, ecdh_pub_bytes = generate_ecdh_keypair()
+    #             ecdh_signature = sign_data(self.private_key, ecdh_pub_bytes)
+
+    #             request = {
+    #                 "type": "send_file_request",
+    #                 "filename": filename,
+    #                 "ecdh_pub": base64.b64encode(ecdh_pub_bytes).decode(),
+    #                 "signature": base64.b64encode(ecdh_signature).decode()
+    #             }
+    #             s.sendall(json.dumps(request).encode())
+    #             self.log("[*] Sent STS key exchange request.")
+
+    #             # STS step 2: receive peer response
+    #             response = s.recv(8192)
+    #             reply = json.loads(response.decode())
+
+    #             if reply.get("type") != "sts_response":
+    #                 self.log("[!] Unexpected reply during STS handshake.")
+    #                 return
+
+    #             peer_ecdh_pub = base64.b64decode(reply["ecdh_pub"])
+    #             peer_signature = base64.b64decode(reply["signature"])
+
+    #             if not verify_signature(self.peer_public_key, peer_ecdh_pub, peer_signature):
+    #                 self.log("[!] Invalid STS signature from peer.")
+    #                 return
+
+    #             aes_key = derive_shared_key(ecdh_priv, peer_ecdh_pub)
+    #             self.log("[✓] AES session key derived successfully.")
+
+    #             # Encrypt and send the file
+    #             with open(filepath, "rb") as f:
+    #                 data = f.read()
+
+    #             ciphertext_b64 = aes_encrypt(aes_key, data)
+    #             sha256 = hashlib.sha256(data).hexdigest()
+
+    #             file_payload = {
+    #                 "type": "file_transfer",
+    #                 "filename": filename,
+    #                 "content": ciphertext_b64,
+    #                 "hash": sha256
+    #             }
+
+    #             s.sendall(json.dumps(file_payload).encode())
+    #             self.log(f"[✓] Encrypted file '{filename}' sent successfully.")
+
+    #     except Exception as e:
+    #         self.log(f"[!] Failed to send file: {e}")
+
+
+    #         # Generate ephemeral ECDH key pair
+    #         ecdh_priv, ecdh_pub_bytes = generate_ecdh_keypair()
+
+    #         # Sign ECDH pub key with your RSA private key
+    #         ecdh_signature = sign_data(self.private_key, ecdh_pub_bytes)
+
+    #         # Send ECDH pub key, signature, and file metadata to peer
+    #         request = {
+    #             "type": "send_file_request",
+    #             "filename": filename,
+    #             "ecdh_pub": base64.b64encode(ecdh_pub_bytes).decode(),
+    #             "signature": base64.b64encode(ecdh_signature).decode()
+    #         }
+    #         s.sendall(json.dumps(request).encode())
+
+    #         ciphertext_b64 = aes_encrypt(aes_key, data)
+    #         sha256 = hashlib.sha256(data).hexdigest()
+            
+    #         encrypted_key = self.peer_public_key.encrypt(
+    #             aes_key,
+    #             rsa_padding.OAEP(
+    #                 mgf=rsa_padding.MGF1(algorithm=hashes.SHA256()),
+    #                 algorithm=hashes.SHA256(),
+    #                 label=None
+    #             )
+    #         )
+    #         encrypted_key_b64 = base64.b64encode(encrypted_key).decode()
+
+    #         ip, port = self.connected_peer
+    #         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+    #             s.connect((ip, port))
+
+    #             # Normal case
+    #             request = {
+    #                 "type": "send_file_request",
+    #                 "filename": filename,
+    #                 "aes_key": encrypted_key_b64,
+    #                 "content": ciphertext_b64,
+    #                 "hash": sha256
+    #             }
+
+    #             # attack cases:
+    #             # 1. Tampered file content (integrity fail)
+    #             # request ={
+    #             #     "type": "send_file_request",
+    #             #     "filename": filename,
+    #             #     "aes_key": encrypted_key_b64,
+    #             #     "content": "0000000000000000000000000000000000000000000000000000000000000000",
+    #             #     "hash": sha256
+    #             # }
+    #             # 2. Forged hash (integrity mismatch)
+    #             # request ={
+    #             #     "type": "send_file_request",
+    #             #     "filename": filename,
+    #             #     "aes_key": encrypted_key_b64,
+    #             #     "content": ciphertext_b64,
+    #             #     "hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    #             # }
+    #             # 3. Wrong RSA public key used to encrypt AES key
+    #             # request ={
+    #             #     "type": "send_file_request",
+    #             #     "filename": filename,
+    #             #     "aes_key": "0000000000000000000000000000000000000000000000000000000000000000",
+    #             #     "content": ciphertext_b64,
+    #             #     "hash": sha256
+    #             # }
+
+    #             s.sendall(json.dumps(request).encode())
+
+    #             # Receive peer's ECDH public key and signature
+    #             response = s.recv(8192)
+    #             reply = json.loads(response.decode())
+
+    #             if reply.get("type") != "sts_response":
+    #                 self.log("[!] Unexpected reply during STS handshake.")
+    #                 return
+
+    #             peer_ecdh_pub = base64.b64decode(reply["ecdh_pub"])
+    #             peer_signature = base64.b64decode(reply["signature"])
+
+    #             # Verify peer's RSA signature
+    #             if not verify_signature(self.peer_public_key, peer_ecdh_pub, peer_signature):
+    #                 self.log("[!] Invalid STS signature from peer.")
+    #                 return
+
+    #             # Derive shared AES key
+    #             aes_key = derive_shared_key(ecdh_priv, peer_ecdh_pub)
+
+
     def send_file_to_peer(self):
         if not self.connected_peer:
             messagebox.showwarning("Not Connected", "Please connect to a peer first.")
@@ -215,73 +390,74 @@ class P2PGUI:
 
         filepath = filedialog.askopenfilename(title="Select file to send")
         if not filepath:
-            return  # User cancelled
+            return
 
         filename = os.path.basename(filepath)
+
         try:
-            with open(filepath, "rb") as f:
-                data = f.read()
-
-            aes_key = generate_aes_key()
-            ciphertext_b64 = aes_encrypt(aes_key, data)
-            sha256 = hashlib.sha256(data).hexdigest()
-            
-            encrypted_key = self.peer_public_key.encrypt(
-                aes_key,
-                rsa_padding.OAEP(
-                    mgf=rsa_padding.MGF1(algorithm=hashes.SHA256()),
-                    algorithm=hashes.SHA256(),
-                    label=None
-                )
-            )
-            encrypted_key_b64 = base64.b64encode(encrypted_key).decode()
-
             ip, port = self.connected_peer
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.connect((ip, port))
 
-                # Normal case
-                # request = {
-                #     "type": "send_file_request",
-                #     "filename": filename,
-                #     "aes_key": encrypted_key_b64,
-                #     "content": ciphertext_b64,
-                #     "hash": sha256
-                # }
+                # STS step 1: generate ephemeral ECDH key pair and sign it
+                ecdh_priv, ecdh_pub_bytes = generate_ecdh_keypair()
+                ecdh_signature = sign_data(self.private_key, ecdh_pub_bytes)
 
-                # attack cases:
-                # 1. Tampered file content (integrity fail)
-                request ={
+                request = {
                     "type": "send_file_request",
                     "filename": filename,
-                    "aes_key": encrypted_key_b64,
-                    "content": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "ecdh_pub": base64.b64encode(ecdh_pub_bytes).decode(),
+                    "signature": base64.b64encode(ecdh_signature).decode()
+                }
+                s.sendall(json.dumps(request).encode())
+                self.log("[*] Sent STS key exchange request.")
+
+                # STS step 2: receive peer response
+                response = s.recv(8192)
+                reply = json.loads(response.decode())
+
+                if reply.get("type") != "sts_response":
+                    self.log("[!] Unexpected reply during STS handshake.")
+                    return
+
+                peer_ecdh_pub = base64.b64decode(reply["ecdh_pub"])
+                peer_signature = base64.b64decode(reply["signature"])
+
+                if not verify_signature(self.peer_public_key, peer_ecdh_pub, peer_signature):
+                    self.log("[!] Invalid STS signature from peer.")
+                    return
+
+                aes_key = derive_shared_key(ecdh_priv, peer_ecdh_pub)
+                self.log("[✓] AES session key derived successfully.")
+
+                # Encrypt and send the file
+                with open(filepath, "rb") as f:
+                    data = f.read()
+
+                ciphertext_b64 = aes_encrypt(aes_key, data)
+                sha256 = hashlib.sha256(data).hexdigest()
+
+                file_payload = {
+                    "type": "file_transfer",
+                    "filename": filename,
+                    "content": ciphertext_b64,
                     "hash": sha256
                 }
-                # 2. Forged hash (integrity mismatch)
-                # request ={
-                #     "type": "send_file_request",
-                #     "filename": filename,
-                #     "aes_key": encrypted_key_b64,
-                #     "content": ciphertext_b64,
-                #     "hash": "0000000000000000000000000000000000000000000000000000000000000000"
-                # }
-                # 3. Wrong RSA public key used to encrypt AES key
-                # request ={
-                #     "type": "send_file_request",
-                #     "filename": filename,
-                #     "aes_key": "0000000000000000000000000000000000000000000000000000000000000000",
-                #     "content": ciphertext_b64,
-                #     "hash": sha256
-                # }
 
-                s.sendall(json.dumps(request).encode())
+                s.sendall(json.dumps(file_payload).encode())
+                self.log(f"[*] Sent encrypted file '{filename}', waiting for peer response...")
 
-                response = json.loads(s.recv(2048).decode())
-                if response["type"] == "accept":
-                    self.log(f"[✓] Peer accepted file: {filename}")
+                response = s.recv(4096)
+                reply = json.loads(response.decode())
+
+                if reply.get("type") == "accept":
+                    self.log(f"[✓] Peer accepted the file '{filename}'.")
+                elif reply.get("type") == "refused":
+                    reason = reply.get("reason", "peer declined")
+                    self.log(f"[!] Peer refused the file '{filename}'. Reason: {reason}")
                 else:
-                    self.log(f"[!] Peer refused file: {filename}")
+                    self.log(f"[!] Unexpected response after file sent: {reply}")
+
 
         except Exception as e:
             self.log(f"[!] Failed to send file: {e}")
@@ -297,9 +473,6 @@ class P2PGUI:
             os.remove("trusted_peers.json")
             self.log("[!] Old trusted peers removed due to key change.")
             messagebox.showinfo("Trust Reset", "Trusted peers have been cleared. You must re-authenticate with them.")
-
-
-
 
 
     def log(self, msg):

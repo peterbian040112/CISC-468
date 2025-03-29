@@ -14,6 +14,10 @@ from aes_utils import aes_decrypt
 from cryptography.hazmat.primitives.asymmetric import padding as rsa_padding
 from cryptography.hazmat.primitives import hashes
 
+from sts_utils import generate_ecdh_keypair, derive_shared_key, sign_data, verify_signature
+from aes_utils import aes_decrypt
+
+
 SERVICE_TYPE = "_p2pfileshare._tcp.local."
 SERVICE_NAME = "PythonPeer2._p2pfileshare._tcp.local."
 PORT = 9001
@@ -140,24 +144,58 @@ def start_server(private_key, public_key):
                         conn.sendall(json.dumps(response).encode())
                         print(f"[!] Refused or not found: {fname}")
 
+
                 elif request["type"] == "send_file_request":
                     fname = request.get("filename")
-                    encrypted_key_b64 = request.get("aes_key")
-                    ciphertext_b64 = request.get("content")
-                    hash_val = request.get("hash")
-                    print(f"[*] Incoming encrypted file: {fname}")
+                    peer_ecdh_pub_b64 = request.get("ecdh_pub")
+                    peer_signature_b64 = request.get("signature")
+
+                    peer_ecdh_pub = base64.b64decode(peer_ecdh_pub_b64)
+                    peer_signature = base64.b64decode(peer_signature_b64)
+
+                    # Verify peer's RSA signature
+                    if not verify_signature(public_key, peer_ecdh_pub, peer_signature):
+                        print("[!] Invalid RSA signature from sender.")
+                        conn.sendall(json.dumps({"type": "refused", "reason": "bad_signature"}).encode())
+                        return
+
+                    # Generates local ECDH public and private key pair
+                    local_ecdh_priv, local_ecdh_pub = generate_ecdh_keypair()
+
+                    # Sign local ECDH public key
+                    local_signature = sign_data(private_key, local_ecdh_pub)
+
+                    response = {
+                        "type": "sts_response",
+                        "ecdh_pub": base64.b64encode(local_ecdh_pub).decode(),
+                        "signature": base64.b64encode(local_signature).decode()
+                    }
+                    conn.sendall(json.dumps(response).encode())
+
+                    chunks = []
+                    while True:
+                        chunk = conn.recv(8192)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        try:
+                            data2 = b''.join(chunks).decode()
+                            file_payload = json.loads(data2)
+                            break
+                        except json.JSONDecodeError:
+                            continue
+
+                    if file_payload["type"] != "file_transfer":
+                        print("[!] Expected file_transfer but got:", file_payload.get("type"))
+                        return
+
+                    ciphertext_b64 = file_payload["content"]
+                    hash_val = file_payload["hash"]
+
+                    # Derive AES key from STS
+                    aes_key = derive_shared_key(local_ecdh_priv, peer_ecdh_pub)
 
                     try:
-                        encrypted_key = base64.b64decode(encrypted_key_b64)
-                        aes_key = private_key.decrypt(
-                            encrypted_key,
-                            rsa_padding.OAEP(
-                                mgf=rsa_padding.MGF1(algorithm=hashes.SHA256()),
-                                algorithm=hashes.SHA256(),
-                                label=None
-                            )
-                        )
-
                         plaintext = aes_decrypt(aes_key, ciphertext_b64)
                         computed_hash = hashlib.sha256(plaintext).hexdigest()
 
@@ -167,21 +205,28 @@ def start_server(private_key, public_key):
                             return
 
                         user_input = input(f"[?] Accept file '{fname}' from peer? (y/n): ").strip().lower()
+                        
+                        from secure_storage import encrypt_and_store_file, derive_key_from_password
+
                         if user_input == "y":
-                            os.makedirs("downloads", exist_ok=True)
-                            with open(os.path.join("downloads", fname), "wb") as f:
-                                f.write(plaintext)
-                            print(f"[✓] File saved to downloads/{fname}")
+                            os.makedirs("downloads_encrypted", exist_ok=True)
+
+                            # Ask for password (or reuse one you stored earlier)
+                            password = input("Enter your storage password to decrypt: ")
+                            salt = b"p2p-storage-salt"
+                            storage_key = derive_key_from_password(password, salt)
+
+                            encrypt_and_store_file(plaintext, fname, storage_key)
+
+                            print(f"[✓] File securely saved to downloads_encrypted/{fname}")
                             conn.sendall(json.dumps({"type": "accept"}).encode())
+
                         else:
                             conn.sendall(json.dumps({"type": "refused"}).encode())
 
                     except Exception as e:
                         print(f"[!] Decryption failed: {e}")
-                        conn.sendall(json.dumps({"type": "refused"}).encode())
-
-                else:
-                    print(f"[!] Unknown request type: {request.get('type')}")
+                        conn.sendall(json.dumps({"type": "refused", "reason": "decryption_error"}).encode())
 
             except Exception as e:
                 print(f"[!] Error handling request: {e}")

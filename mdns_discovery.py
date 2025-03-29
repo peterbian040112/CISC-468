@@ -21,6 +21,7 @@ class PeerListener(ServiceListener):
         if info:
             ip = socket.inet_ntoa(info.addresses[0])
             port = info.port
+            print(f"[mDNS] Found peer: {name} - {ip}:{port}")
             self.callback(f"{name} - {ip}:{port}")
 
 
